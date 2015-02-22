@@ -1,0 +1,97 @@
+---
+title: 'Practical Machine Learning: Predicting Activity Quality from Activity Monitors'
+output:
+  html_document:
+    keep_md: yes
+  pdf_document: default
+---
+
+## Executive summary
+This documents the creation of a model for predicting activity quality from activity monitor data. The model is highly accurate according to cross-validation estimates of the error.
+
+## Loading and preprocessing the data
+I begin by loading the necessary packages, setting up parallel processing, and importing the data.
+
+```{r}
+require(dplyr)
+require(ggplot2)
+require(doMC)
+require(caret)
+registerDoMC(cores = 4)
+testing = read.csv("pml-testing.csv", na.strings = "#DIV/0!")
+training = read.csv("pml-training.csv", na.strings = "#DIV/0!")
+```
+
+With the data imported there is still an issue with several variables coming in as factor variables rather than numeric. R-bloggers helps me solve this problem by providing a varlist function for picking factor variables from the data. For more information on this you can visit: http://www.r-bloggers.com/selecting-subset-of-variables-in-data-frame/
+```{r}
+varlist <- function (df=NULL,type=c("numeric","factor","character"), pattern="", exclude=NULL) {
+    vars <- character(0)
+    if (any(type %in% "numeric")) {
+        vars <- c(vars,names(df)[sapply(df,is.numeric)])
+    }
+    if (any(type %in% "factor")) {
+        vars <- c(vars,names(df)[sapply(df,is.factor)])
+    }  
+    if (any(type %in% "character")) {
+        vars <- c(vars,names(df)[sapply(df,is.character)])
+    }  
+    vars[(!vars %in% exclude) & grepl(vars,pattern=pattern)]
+}
+```
+
+With this function we can now pick out the weird factor variables and turn them into numeric variables before putting the data back into the main data frame.
+```{r, warning = FALSE}
+tempfix = select(training,one_of(varlist(training,type="factor", exclude = c("user_name", "cvtd_timestamp",
+                                                                             "new_window", "classe"))))
+tempfine = select(training,-one_of(varlist(training,type="factor", exclude = c("user_name", "cvtd_timestamp",
+                                                                             "new_window", "classe"))))
+tempfix = apply(tempfix,2,function(x) {as.numeric(x)})
+training = cbind(tempfine,tempfix)
+```
+
+And the same fix for the holdout data (the data we need to predict but never observe the true outcome).
+```{r, warning = FALSE}
+tempfix = select(testing,one_of(varlist(testing,type="factor", exclude = c("user_name", "cvtd_timestamp",
+                                                                             "new_window"))))
+tempfine = select(testing,-one_of(varlist(testing,type="factor", exclude = c("user_name", "cvtd_timestamp",
+                                                                               "new_window"))))
+tempfix = apply(tempfix,2,function(x) {as.numeric(x)})
+testing = cbind(tempfine,tempfix)
+```
+
+Some variables are all NA in holdout so it doesn't make sense to use them for prediction
+```{r}
+todrop = sapply(testing,function(x) {sum(is.na(x))==20})
+training = training[,!todrop]
+testing = testing[,!-todrop]
+```
+
+## Building a prediction model
+Now the data is in a reasonable form so we can run a model on the training data. We do this with repeated crosss-validation so we can get a good estimate of the out of sample error. For allow for 10 k-folds and repeat this 5 times. I used these numbers to balance bias, accuracy, and time to run the code.
+```{r}
+mymod = train(classe ~ . -raw_timestamp_part_1 -raw_timestamp_part_2 -cvtd_timestamp -new_window -num_window,
+              data = training, method = "rf", trControl = trainControl(method = "repeatedcv", number = 10, repeats = 5
+                                                                       , classProbs = TRUE, savePredictions = TRUE))
+mymod
+```
+
+Taking all of the training models together we can obtain an estimate of the out of sample error:
+```{r}
+allerrors = summarize(group_by(mymod$pred,Resample), aveerror = mean(pred == obs))
+meanerror = mean(allerrors$aveerror)
+meanerror
+```
+
+## Predicting the test set
+We can now predict the test set. Since this is going into github I am not actually uploading the files but holding them in a separate working directory.
+```{r}
+test_prediction<-predict(mymod, newdata=testing)
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(test_prediction)
+```
